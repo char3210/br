@@ -1,6 +1,6 @@
 #![allow(unused)]
 
-use std::{collections::HashMap, fs::{read_dir, read_to_string}};
+use std::{collections::HashMap, fs::{self, read_dir, read_to_string}, io::Write};
 
 use rand::{Rng, RngCore, SeedableRng, rngs::SmallRng, seq::SliceRandom};
 
@@ -395,6 +395,8 @@ fn bruteforce() {
 }
 
 fn eval_predictors() {
+    let results_csv = fs::File::create("results.csv").unwrap();
+    writeln!(&results_csv, "file\\history bits,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20").unwrap();
     for file in read_dir("traces").unwrap() {
         let file = file.unwrap();
         let trace_txt = read_to_string(file.path()).unwrap();
@@ -412,6 +414,7 @@ fn eval_predictors() {
         })
         .collect();
         println!("FILE {:?}", file.path());
+        write!(&results_csv, "{:?},", file.path()).unwrap();
 
         let always_taken = AlwaysTakenPredictor;
         let accuracy = run_and_get_accuracy(always_taken, &branches);
@@ -425,10 +428,11 @@ fn eval_predictors() {
         let accuracy = run_and_get_accuracy(backwards_taken, &branches);
         println!("backwards taken: {:.2}%", accuracy * 100.0);
 
-        for initial in [1, 2] {
+        for initial in [2] {
             let predictor = PerfectBimodalPredictor::new(initial);
             let accuracy = run_and_get_accuracy(predictor, &branches);
             println!("perfect bimodal {initial}: {:.2}%", accuracy * 100.0);
+            write!(&results_csv, "{:.2},", accuracy * 100.0).unwrap();
             
             for history_bits in 1..=20 {
                 // let predictor = PerfectGshareXorPredictor::new(history_bits, initial);
@@ -438,7 +442,9 @@ fn eval_predictors() {
                 let predictor = PerfectBimodalGHistPredictor::new(history_bits, initial);
                 let accuracy = run_and_get_accuracy(predictor, &branches);
                 println!("perfect bimodal ghist {}bit {}: {:.2}%", history_bits, initial, accuracy * 100.0);
+                write!(&results_csv, "{:.2},", accuracy * 100.0).unwrap();
             }
+            writeln!(&results_csv).unwrap();
         }
 
         /* 
