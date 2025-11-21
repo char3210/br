@@ -18,8 +18,25 @@ struct BranchInst {
 }
 
 trait BranchPredictor {
+    type SavedState;
+
+    fn predict(&mut self, pc: u32, inst: BranchInst) -> (BranchDir, Self::SavedState);
+    fn update(&mut self, pc: u32, inst: BranchInst, actual: BranchDir, state: Self::SavedState) {}
+}
+
+trait SimpleBranchPredictor {
     fn predict(&mut self, pc: u32, inst: BranchInst) -> BranchDir;
     fn update(&mut self, pc: u32, inst: BranchInst, actual: BranchDir) {}
+}
+
+impl<T: SimpleBranchPredictor> BranchPredictor for T {
+    type SavedState = ();
+    fn predict(&mut self, pc: u32, inst: BranchInst) -> (BranchDir, Self::SavedState) {
+        (self.predict(pc, inst), ())
+    }
+    fn update(&mut self, pc: u32, inst: BranchInst, actual: BranchDir, _state: Self::SavedState) {
+        self.update(pc, inst, actual);
+    }
 }
 
 
@@ -37,7 +54,7 @@ impl PerfectBimodalPredictor {
     }
 }
 
-impl BranchPredictor for PerfectBimodalPredictor {
+impl SimpleBranchPredictor for PerfectBimodalPredictor {
     fn predict(&mut self, pc: u32, inst: BranchInst) -> BranchDir {
         let counter = self.table.entry(pc).or_insert(self.initial_value);
         let prediction = if *counter >= 2 { BranchDir::Taken } else { BranchDir::NotTaken };
@@ -79,8 +96,11 @@ impl PerfectGshareXorPredictor {
         }
     }
 }
+
 impl BranchPredictor for PerfectGshareXorPredictor {
-    fn predict(&mut self, pc: u32, inst: BranchInst) -> BranchDir {
+    type SavedState = u32; // index
+
+    fn predict(&mut self, pc: u32, inst: BranchInst) -> (BranchDir, Self::SavedState) {
         let history_mask = (1 << self.history_bits) - 1;
         let history = self.global_history & history_mask;
         let index = pc ^ (history << (32 - self.history_bits));
@@ -92,13 +112,13 @@ impl BranchPredictor for PerfectGshareXorPredictor {
             BranchDir::NotTaken => 0,
         };
 
-        prediction
+        (prediction, index)
     }
 
-    fn update(&mut self, pc: u32, inst: BranchInst, actual: BranchDir) {
-        let history_mask = (1 << self.history_bits) - 1;
-        let history = (self.global_history >> 1) & history_mask; // hack but whatever
-        let index = pc ^ (history << (32 - self.history_bits));
+    fn update(&mut self, pc: u32, inst: BranchInst, actual: BranchDir, index: Self::SavedState) {
+        // let history_mask = (1 << self.history_bits) - 1;
+        // let history = (self.global_history >> 1) & history_mask; // hack but whatever
+        // let index = pc ^ (history << (32 - self.history_bits));
         let counter = self.table.entry(index).or_insert(self.initial_value);
         match actual {
             BranchDir::Taken => {
@@ -134,7 +154,9 @@ impl PerfectBimodalGHistPredictor {
     }
 }
 impl BranchPredictor for PerfectBimodalGHistPredictor {
-    fn predict(&mut self, pc: u32, inst: BranchInst) -> BranchDir {
+    type SavedState = (u32, u128); // index
+
+    fn predict(&mut self, pc: u32, inst: BranchInst) -> (BranchDir, Self::SavedState) {
         let history_mask = (1 << self.history_bits) - 1;
         let history = self.global_history & history_mask;
         let counter = self.table.entry((pc, history)).or_insert(self.initial_value);
@@ -145,13 +167,13 @@ impl BranchPredictor for PerfectBimodalGHistPredictor {
             BranchDir::NotTaken => 0,
         };
 
-        prediction
+        (prediction, (pc, history))
     }
 
-    fn update(&mut self, pc: u32, inst: BranchInst, actual: BranchDir) {
-        let history_mask = (1 << self.history_bits) - 1;
-        let history = (self.global_history >> 1) & history_mask; // hack but whatever
-        let counter = self.table.entry((pc, history)).or_insert(self.initial_value);
+    fn update(&mut self, pc: u32, inst: BranchInst, actual: BranchDir, state: Self::SavedState) {
+        // let history_mask = (1 << self.history_bits) - 1;
+        // let history = (self.global_history >> 1) & history_mask;
+        let counter = self.table.entry(state).or_insert(self.initial_value);
         match actual {
             BranchDir::Taken => {
                 if *counter < 3 {
@@ -188,7 +210,9 @@ impl PerfectAlloyedPredictor {
 }
 
 impl BranchPredictor for PerfectAlloyedPredictor {
-    fn predict(&mut self, pc: u32, inst: BranchInst) -> BranchDir {
+    type SavedState = (u32, u32, u32); // index
+
+    fn predict(&mut self, pc: u32, inst: BranchInst) -> (BranchDir, Self::SavedState) {
         let local_history_mask = (1 << self.local_history_bits) - 1;
         let global_history_mask = (1 << self.global_history_bits) - 1;
 
@@ -208,48 +232,48 @@ impl BranchPredictor for PerfectAlloyedPredictor {
             BranchDir::NotTaken => 0,
         };
 
-        prediction
+        (prediction, (pc, local_history, global_history))
     }
 
-    fn update(&mut self, pc: u32, inst: BranchInst, actual: BranchDir) {
+    fn update(&mut self, pc: u32, inst: BranchInst, actual: BranchDir, state: Self::SavedState) {
         // let local_history_mask = (1 << self.local_history_bits) - 1;
         // let global_history_mask = (1 << self.global_history_bits) - 1;
 
-        // let local_history = self.bhr.entry(pc).or_insert(0) & local_history_mask;
-        // let global_history = self.global_history & global_history_mask;
+        // let local_history = (self.bhr[&pc] >> 1) & local_history_mask;
+        // let global_history = (self.global_history >> 1) & global_history_mask;
 
-        // let counter = self.table.entry((pc, *local_history, global_history)).or_insert(2);
-        // match actual {
-        //     BranchDir::Taken => {
-        //         if *counter < 3 {
-        //             *counter += 1;
-        //         }
-        //     }
-        //     BranchDir::NotTaken => {
-        //         if *counter > 0 {
-        //             *counter -= 1;
-        //         }
-        //     }
-        // };
+        let counter = self.table.entry(state).or_insert(2);
+        match actual {
+            BranchDir::Taken => {
+                if *counter < 3 {
+                    *counter += 1;
+                }
+            }
+            BranchDir::NotTaken => {
+                if *counter > 0 {
+                    *counter -= 1;
+                }
+            }
+        };
     }
 }
 
 struct AlwaysTakenPredictor;
-impl BranchPredictor for AlwaysTakenPredictor {
+impl SimpleBranchPredictor for AlwaysTakenPredictor {
     fn predict(&mut self, _pc: u32, _inst: BranchInst) -> BranchDir {
         BranchDir::Taken
     }
 }
 
 struct AlwaysNotTakenPredictor;
-impl BranchPredictor for AlwaysNotTakenPredictor {
+impl SimpleBranchPredictor for AlwaysNotTakenPredictor {
     fn predict(&mut self, _pc: u32, _inst: BranchInst) -> BranchDir {
         BranchDir::NotTaken
     }
 }
 
 struct BackwardsTakenPredictor;
-impl BranchPredictor for BackwardsTakenPredictor {
+impl SimpleBranchPredictor for BackwardsTakenPredictor {
     fn predict(&mut self, pc: u32, inst: BranchInst) -> BranchDir {
         if inst.target < pc {
             BranchDir::Taken
@@ -259,14 +283,30 @@ impl BranchPredictor for BackwardsTakenPredictor {
     }
 }
 
+// this is crazy
+trait TBPEntry {
+    fn predict(&mut self, pc: u32, inst: BranchInst) -> (BranchDir, Box<dyn std::any::Any>);
+    fn update(&mut self, pc: u32, inst: BranchInst, actual: BranchDir, state: Box<dyn std::any::Any>);
+}
+impl<T: BranchPredictor> TBPEntry for T where T::SavedState: 'static {
+    fn predict(&mut self, pc: u32, inst: BranchInst) -> (BranchDir, Box<dyn std::any::Any>) {
+        let res = self.predict(pc, inst);
+        (res.0, Box::new(res.1))
+    }
+    fn update(&mut self, pc: u32, inst: BranchInst, actual: BranchDir, state: Box<dyn std::any::Any>) {
+        let state = *state.downcast::<T::SavedState>().unwrap();
+        self.update(pc, inst, actual, state);
+    }
+}
+
 struct TournamentPredictor {
-    predictors: Vec<Box<dyn BranchPredictor>>,
+    predictors: Vec<Box<dyn TBPEntry>>,
     predictions: Vec<BranchDir>,
     confidences: HashMap<u32, Vec<u8>>,
 }
 
 impl TournamentPredictor {
-    fn new(predictors: Vec<Box<dyn BranchPredictor>>) -> Self {
+    fn new(predictors: Vec<Box<dyn TBPEntry>>) -> Self {
         TournamentPredictor {
             predictors,
             predictions: Vec::new(),
@@ -276,11 +316,15 @@ impl TournamentPredictor {
 }
 
 impl BranchPredictor for TournamentPredictor {
-    fn predict(&mut self, pc: u32, inst: BranchInst) -> BranchDir {
+    type SavedState = Vec<Box<dyn std::any::Any>>;
+
+    fn predict(&mut self, pc: u32, inst: BranchInst) -> (BranchDir, Self::SavedState) {
         self.predictions.clear();
+        let mut states: Vec<Box<dyn std::any::Any>> = Vec::new();
         for predictor in &mut self.predictors {
             let prediction = predictor.predict(pc, inst);
-            self.predictions.push(prediction);
+            self.predictions.push(prediction.0);
+            states.push(prediction.1);
         }
         let confidences = self.confidences.entry(pc).or_insert(vec![1; self.predictors.len()]);
         let mut bestconfidence = 0;
@@ -292,14 +336,14 @@ impl BranchPredictor for TournamentPredictor {
             }
         }
 
-        best
+        (best, states)
     }
 
-    fn update(&mut self, pc: u32, inst: BranchInst, actual: BranchDir) {
+    fn update(&mut self, pc: u32, inst: BranchInst, actual: BranchDir, mut state: Self::SavedState) {
         let confidences = self.confidences.entry(pc).or_insert(vec![1; self.predictors.len()]);
         for (i, predictor) in self.predictors.iter_mut().enumerate() {
             let prediction = self.predictions[i];
-            predictor.update(pc, inst, actual);
+            predictor.update(pc, inst, actual, state.remove(0));
             if prediction == actual {
                 if confidences[i] < 4 {
                     confidences[i] += 1;
@@ -319,11 +363,11 @@ fn run_and_get_accuracy(mut predictor: impl BranchPredictor, branches: &[(u32, B
 
 
     for &(pc, inst, actual) in branches {
-        let prediction = predictor.predict(pc, inst);
+        let (prediction, state) = predictor.predict(pc, inst);
         if prediction == actual {
             correct_predictions += 1;
         }
-        predictor.update(pc, inst, actual);
+        predictor.update(pc, inst, actual, state);
     }
 
     return correct_predictions as f64 / total_predictions as f64;
@@ -441,28 +485,43 @@ fn eval_predictors() {
 
                 let predictor = PerfectBimodalGHistPredictor::new(history_bits, initial);
                 let accuracy = run_and_get_accuracy(predictor, &branches);
-                println!("perfect bimodal ghist {}bit {}: {:.2}%", history_bits, initial, accuracy * 100.0);
+                // println!("perfect bimodal ghist {}bit {}: {:.2}%", history_bits, initial, accuracy * 100.0);
                 write!(&results_csv, "{:.2},", accuracy * 100.0).unwrap();
             }
             writeln!(&results_csv).unwrap();
         }
 
-        /* 
-        let predictors: Vec<Box<dyn BranchPredictor>> = vec![
-            Box::new(PerfectBimodalPredictor::new(2)),
-            Box::new(PerfectGshareXorPredictor::new(2, 2)),
-            Box::new(PerfectGshareXorPredictor::new(4, 2)),
-            Box::new(PerfectGshareXorPredictor::new(8, 2)),
-            Box::new(PerfectBimodalGHistPredictor::new(16, 2)),
-            Box::new(PerfectBimodalGHistPredictor::new(32, 2)),
-            Box::new(PerfectBimodalGHistPredictor::new(64, 2)),
-            Box::new(PerfectBimodalGHistPredictor::new(127, 2)),
+        // let mut best_accuracy = 0.0;
+        // let mut best_config = (0, 0);
+        // for local_bits in 0..12 {
+        //     for global_bits in 0..12 {
+        //         let predictor = PerfectAlloyedPredictor::new(local_bits, global_bits);
+        //         let accuracy = run_and_get_accuracy(predictor, &branches);
+        //         println!("perfect alloyed {}bit local {}bit global: {:.2}%", local_bits, global_bits, accuracy * 100.0);
+        //         if accuracy > best_accuracy {
+        //             best_accuracy = accuracy;
+        //             best_config = (local_bits, global_bits);
+        //         }
+        //     }
+        // }
+        // println!("best alloyed config: {}bit local {}bit global: {:.2}%", best_config.0, best_config.1, best_accuracy * 100.0);
 
+        
+        let predictors: Vec<Box<dyn TBPEntry>> = vec![
+            // Box::new(PerfectBimodalGHistPredictor::new(16, 2)),
+            Box::new(PerfectGshareXorPredictor::new(8, 2)),
+            Box::new(PerfectGshareXorPredictor::new(4, 2)),
+            Box::new(PerfectGshareXorPredictor::new(2, 2)),
+            Box::new(PerfectGshareXorPredictor::new(1, 2)),
+            Box::new(PerfectBimodalPredictor::new(2)),
+            // Box::new(PerfectBimodalGHistPredictor::new(32, 2)),
+            // Box::new(PerfectBimodalGHistPredictor::new(64, 2)),
+            // Box::new(PerfectBimodalGHistPredictor::new(127, 2)),
         ];
         let tournament_predictor = TournamentPredictor::new(predictors);
         let accuracy = run_and_get_accuracy(tournament_predictor, &branches);
         println!("tournament predictor: {:.2}%", accuracy * 100.0);
-        */
+        
         println!();
     }
 }
